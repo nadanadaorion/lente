@@ -13,7 +13,7 @@ Sistema personal de enfoque y gestión creativa con entrada en lenguaje natural,
 ## Archivos importantes
 
 - `index.html`: entrada de GitHub Pages.
-- `outputs/maleza-control.html`: interfaz ORI♡N LENTE.
+- `outputs/orion-lente.html`: interfaz ORI♡N LENTE.
 - `outputs/cloud-sync.js`: sincronización web y sesión.
 - `config.js`: URL pública del backend.
 - `backend/src/index.js`: API, OAuth y Calendar.
@@ -100,7 +100,7 @@ Sube ese cambio a GitHub. Al pulsar **Conectar Google**, la app pedirá acceso a
 
 ## Probar localmente
 
-La interfaz puede abrirse directamente desde `outputs/maleza-control.html`. Para probar la navegación igual que GitHub Pages:
+La interfaz puede abrirse directamente desde `outputs/orion-lente.html`. Para probar la navegación igual que GitHub Pages:
 
 ```powershell
 python -m http.server 8080

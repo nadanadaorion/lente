@@ -135,9 +135,13 @@ async function requireSession(request, env) {
 }
 
 async function getState(session, request, env) {
-  const row = await env.DB.prepare("SELECT state_json, updated_at FROM users WHERE email = ?")
+  const row = await env.DB.prepare("SELECT state_json, state_version, updated_at FROM users WHERE email = ?")
     .bind(session.email).first();
-  return json({ state: row?.state_json ? JSON.parse(row.state_json) : null, updatedAt: row?.updated_at || null }, 200, request, env);
+  return json({
+    state: row?.state_json ? JSON.parse(row.state_json) : null,
+    version: Number(row?.state_version || 0),
+    updatedAt: row?.updated_at || null,
+  }, 200, request, env);
 }
 
 async function putState(session, request, env) {
@@ -148,8 +152,35 @@ async function putState(session, request, env) {
   const incoming = body?.state;
   if (!validState(incoming)) return json({ error: "invalid_state" }, 400, request, env);
 
-  const oldRow = await env.DB.prepare("SELECT state_json FROM users WHERE email = ?").bind(session.email).first();
+  const oldRow = await env.DB.prepare("SELECT state_json, state_version, updated_at FROM users WHERE email = ?")
+    .bind(session.email).first();
   const previous = oldRow?.state_json ? JSON.parse(oldRow.state_json) : null;
+  const currentVersion = Number(oldRow?.state_version || 0);
+      const baseVersion = body?.baseVersion;
+  if (!Number.isInteger(baseVersion) || baseVersion !== currentVersion) {
+    return json({
+      error: "version_conflict",
+      state: previous,
+      version: currentVersion,
+      updatedAt: oldRow?.updated_at || null,
+    }, 409, request, env);
+  }
+
+  const claimed = await env.DB.prepare(`
+    UPDATE users SET state_version = state_version + 1
+    WHERE email = ? AND state_version = ?
+  `).bind(session.email, currentVersion).run();
+  if (!claimed.meta?.changes) {
+    const latest = await env.DB.prepare("SELECT state_json, state_version, updated_at FROM users WHERE email = ?")
+      .bind(session.email).first();
+    return json({
+      error: "version_conflict",
+      state: latest?.state_json ? JSON.parse(latest.state_json) : null,
+      version: Number(latest?.state_version || 0),
+      updatedAt: latest?.updated_at || null,
+    }, 409, request, env);
+  }
+
   let calendar = { ok: false, reason: "not_connected" };
   let normalized = incoming;
   if (session.encryptedRefreshToken) {
@@ -164,7 +195,7 @@ async function putState(session, request, env) {
   const updatedAt = new Date().toISOString();
   await env.DB.prepare("UPDATE users SET state_json = ?, updated_at = ? WHERE email = ?")
     .bind(JSON.stringify(normalized), updatedAt, session.email).run();
-  return json({ ok: true, state: normalized, updatedAt, calendar }, 200, request, env);
+  return json({ ok: true, state: normalized, version: currentVersion + 1, updatedAt, calendar }, 200, request, env);
 }
 
 function validState(value) {

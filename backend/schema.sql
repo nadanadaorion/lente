@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS users (
   picture_url TEXT NOT NULL DEFAULT '',
   google_refresh_token TEXT,
   state_json TEXT,
+  state_version INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

@@ -1,3 +1,4 @@
+// ORI♡N LENTE: conflict-safe synchronization across devices.
 const GOOGLE_SCOPE = [
   "openid",
   "email",

@@ -54,7 +54,6 @@ npx wrangler d1 create orion-lente-db
 Copia el `database_id` recibido en `backend/wrangler.toml`. Sustituye también:
 
 - `WORKER_URL` con tu subdominio real de Workers.
-- `ALLOWED_EMAIL` con el único correo Google autorizado.
 - `FRONTEND_URL` si el repositorio tiene otro nombre.
 
 Inicializa D1:
@@ -69,6 +68,7 @@ Guarda los secretos; Wrangler los solicita sin escribirlos en archivos:
 npx wrangler secret put GOOGLE_CLIENT_ID --config backend/wrangler.toml
 npx wrangler secret put GOOGLE_CLIENT_SECRET --config backend/wrangler.toml
 npx wrangler secret put TOKEN_ENCRYPTION_KEY --config backend/wrangler.toml
+npx wrangler secret put ALLOWED_EMAIL --config backend/wrangler.toml
 ```
 
 `TOKEN_ENCRYPTION_KEY` puede ser una frase larga aleatoria. El Worker deriva de ella una clave AES-GCM para cifrar el refresh token de Google antes de guardarlo.

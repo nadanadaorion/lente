@@ -125,6 +125,7 @@
       ...local,
       artists: mergeItems(foundation.artists, local.artists, remote.artists),
       tasks: mergeItems(foundation.tasks, local.tasks, remote.tasks),
+      lexicon: mergeItems(foundation.lexicon, local.lexicon, remote.lexicon),
       feed: mergeItems(foundation.feed, local.feed, remote.feed)
         .sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")))
         .slice(0, 1000),

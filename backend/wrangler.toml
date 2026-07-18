@@ -1,14 +1,14 @@
 name = "orion-lente-api"
-main = "src/index.js"
+main = "./src/index.js"
 compatibility_date = "2026-07-17"
+no_bundle = true
 
 [[d1_databases]]
 binding = "DB"
 database_name = "orion-lente-db"
-database_id = "REEMPLAZAR_CON_D1_DATABASE_ID"
+database_id = "3efd4e17-6702-4ca2-beed-4ffde6035d8c"
 
 [vars]
 FRONTEND_URL = "https://nadanadaorion.github.io/lente/"
-WORKER_URL = "https://orion-lente-api.REEMPLAZAR.workers.dev"
-ALLOWED_EMAIL = "REEMPLAZAR_CON_TU_CORREO_GOOGLE"
+WORKER_URL = "https://orion-lente-api.terrterreros.workers.dev"
 CALENDAR_ID = "primary"

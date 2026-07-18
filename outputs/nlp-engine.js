@@ -175,25 +175,46 @@
     return wordScore * 0.82 + dice(input, phrase) * 0.18;
   }
 
+  function textVariants(text, dictionary) {
+    const variants = [text];
+    const seen = new Set([normalize(text)]);
+    for (const entry of learnedEntries(dictionary, "term")) {
+      if (aliasScore(text, entry.phrase) >= 0.72) {
+        const key = normalize(entry.value);
+        if (key && !seen.has(key)) {
+          seen.add(key);
+          variants.push(entry.value);
+        }
+      }
+    }
+    return variants;
+  }
+
   function bestLearned(text, kind, dictionary) {
     let best = null;
     let score = 0;
+    const variants = textVariants(text, dictionary);
     for (const entry of learnedEntries(dictionary, kind)) {
-      const candidate = aliasScore(text, entry.phrase);
-      if (candidate > score) {
-        score = candidate;
-        best = entry;
+      for (const variant of variants) {
+        const candidate = aliasScore(variant, entry.phrase);
+        if (candidate > score) {
+          score = candidate;
+          best = entry;
+        }
       }
     }
     return best && score >= 0.62 ? { value: best.value, score, source: "learned", entry: best } : null;
   }
 
-  function bestBuiltin(text, groups) {
+  function bestBuiltin(text, groups, dictionary = []) {
     let result = null;
+    const variants = textVariants(text, dictionary);
     for (const [value, aliases] of Object.entries(groups)) {
       for (const alias of aliases) {
-        const score = aliasScore(text, alias);
-        if (!result || score > result.score) result = { value, score, source: "builtin", alias };
+        for (const variant of variants) {
+          const score = aliasScore(variant, alias);
+          if (!result || score > result.score) result = { value, score, source: "builtin", alias };
+        }
       }
     }
     return result && result.score >= 0.68 ? result : null;
@@ -202,13 +223,13 @@
   function detectIntent(text, dictionary = []) {
     const learned = bestLearned(text, "intent", dictionary);
     if (learned && learned.score >= 0.82) return learned;
-    const builtin = bestBuiltin(text, BUILTINS.intent);
+    const builtin = bestBuiltin(text, BUILTINS.intent, dictionary);
     if (learned && (!builtin || learned.score >= builtin.score)) return learned;
     if (!builtin) return learned;
     const input = normalize(text);
     if (builtin.value === "create" && /\b(ya|quedo|quedaron|esta|estan|salio)\b/.test(input)) {
       const complete = Object.fromEntries([["complete", BUILTINS.intent.complete]]);
-      const completion = bestBuiltin(text, complete);
+      const completion = bestBuiltin(text, complete, dictionary);
       if (completion) return completion;
     }
     return builtin;
@@ -217,7 +238,7 @@
   function detectArea(text, dictionary = []) {
     const learned = bestLearned(text, "area", dictionary);
     if (learned && learned.score >= 0.78) return learned;
-    const builtin = bestBuiltin(text, BUILTINS.area);
+    const builtin = bestBuiltin(text, BUILTINS.area, dictionary);
     if (learned && (!builtin || learned.score >= builtin.score)) return learned;
     return builtin;
   }

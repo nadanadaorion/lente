@@ -201,6 +201,7 @@ async function putState(session, request, env) {
 
 function validState(value) {
   return value && typeof value === "object" && Array.isArray(value.artists) && Array.isArray(value.tasks) && Array.isArray(value.feed)
+    && (!value.lexicon || (Array.isArray(value.lexicon) && value.lexicon.length <= 250))
     && value.tasks.length <= 5000 && value.artists.length <= 100 && value.feed.length <= 1000;
 }
 

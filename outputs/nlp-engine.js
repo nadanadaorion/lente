@@ -303,9 +303,37 @@
     return applyMeridiem(rawHour, readMeridiem(meridiemText || "")) * 60 + minute;
   }
 
-  // Duración explícita: "de dos horas", "de media hora", "de 90 minutos".
-  function parseDuration(text) {
+  const COUNT = "\\d+|un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|quince|veinte|treinta|cuarenta|sesenta|noventa";
+  // "en 2 minutos" / "dentro de una hora": cuándo empieza, no cuánto dura.
+  const OFFSET_RULES = [
+    [new RegExp(`\\b(?:en|dentro\\s+de)\\s+una?\\s+hora\\s+y\\s+media\\b`), () => 90],
+    [new RegExp(`\\b(?:en|dentro\\s+de)\\s+media\\s+hora\\b`), () => 30],
+    [new RegExp(`\\b(?:en|dentro\\s+de)\\s+un\\s+cuarto\\s+de\\s+hora\\b`), () => 15],
+    [new RegExp(`\\b(?:en|dentro\\s+de)\\s+(${COUNT})\\s*(?:horas?|hrs?)\\b`), (m) => (wordToNumber(m[1]) || 0) * 60],
+    [new RegExp(`\\b(?:en|dentro\\s+de)\\s+(${COUNT})\\s*(?:minutos?|mins?|min)\\b`), (m) => wordToNumber(m[1]) || 0],
+  ];
+
+  // Minutos que faltan para que arranque la tarea, o null si no se indica.
+  function parseOffset(text) {
     const input = normalize(text);
+    for (const [pattern, toMinutes] of OFFSET_RULES) {
+      const match = input.match(pattern);
+      if (match) {
+        const minutes = toMinutes(match);
+        if (minutes > 0) return minutes;
+      }
+    }
+    return null;
+  }
+
+  function withoutOffsets(input) {
+    return OFFSET_RULES.reduce((text, [pattern]) => text.replace(pattern, " "), input);
+  }
+
+  // Duración explícita: "de dos horas", "de media hora", "de 90 minutos".
+  // Se ignoran los tramos de "en N minutos", que indican inicio y no duración.
+  function parseDuration(text) {
+    const input = withoutOffsets(normalize(text));
     if (/\bde\s+media\s+hora\b|\bmedia\s+hora\b/.test(input)) return 30;
     if (/\bde\s+un\s+cuarto\s+de\s+hora\b|\bcuarto\s+de\s+hora\b/.test(input)) return 15;
     if (/\bhora\s+y\s+media\b/.test(input)) return 90;
@@ -376,10 +404,14 @@
       }
     }
 
-    if (mentionsNow(input)) {
-      return { startMinutes: null, endMinutes: null, durationMinutes: duration, isNow: true };
+    const offset = parseOffset(input);
+    if (offset !== null) {
+      return { startMinutes: null, endMinutes: null, durationMinutes: duration, isNow: false, offsetMinutes: offset };
     }
-    return duration ? { startMinutes: null, endMinutes: null, durationMinutes: duration, isNow: false } : null;
+    if (mentionsNow(input)) {
+      return { startMinutes: null, endMinutes: null, durationMinutes: duration, isNow: true, offsetMinutes: null };
+    }
+    return duration ? { startMinutes: null, endMinutes: null, durationMinutes: duration, isNow: false, offsetMinutes: null } : null;
   }
 
   // Fragmentos que describen cuándo/para quién ocurre algo: se muestran en la
@@ -390,6 +422,10 @@
     // "Sin respuesta del sello" → "Respuesta del sello": solo sobra la negación.
     /^\s*sin\s+(?=respuesta\b)/i,
     /^\s*(?:ya\s+)?(?:estoy\s+)?(?:en\s+espera|a\s+la\s+espera|esperando|esperamos|en\s+pausa|pausad[oa]|en\s+standby|standby|congelad[oa]|bloquead[oa]|detenid[oa]|trabad[oa]|frenad[oa]|atorad[oa]|pendiente|en\s+curso|trabajando\s+en)\b[\s:,;.–—-]*(?:de\s+l[oa]s?|del|de|por|a)?\s*(?:l[oa]s?\s+|un[oa]?s?\s+)?/i,
+    // Desfases de inicio: van antes que las duraciones para no dejar "dentro" suelto.
+    /\b(?:en|dentro\s+de)\s+una?\s+hora\s+y\s+media\b/gi,
+    /\b(?:en|dentro\s+de)\s+(?:media\s+hora|un\s+cuarto\s+de\s+hora)\b/gi,
+    /\b(?:en|dentro\s+de)\s+(?:\d+|un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|quince|veinte|treinta|cuarenta|sesenta|noventa)\s*(?:horas?|hrs?|minutos?|mins?|min)\b/gi,
     // Horas, duraciones y momentos.
     /\b(?:de|desde)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s+(?:a|hasta)\s+(?:las\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?/gi,
     /\ba\s+las?\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?|horas?)?(?:\s+de\s+la\s+(?:mañana|tarde|noche))?/gi,

@@ -327,6 +327,7 @@ async function pruneBackups(email, now, env) {
 
 function validState(value) {
   return value && typeof value === "object" && Array.isArray(value.artists) && Array.isArray(value.tasks) && Array.isArray(value.feed)
+    && (!value.ideas || (Array.isArray(value.ideas) && value.ideas.length <= 300))
     && (!value.lexicon || (Array.isArray(value.lexicon) && value.lexicon.length <= 250))
     && value.tasks.length <= 5000 && value.artists.length <= 100 && value.feed.length <= 1000;
 }

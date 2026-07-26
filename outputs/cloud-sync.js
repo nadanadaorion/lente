@@ -4,6 +4,7 @@
   const TOKEN_KEY = "orion-lente-cloud-session-v1";
   const API_KEY = "orion-lente-cloud-api-v1";
   const META_KEY = "orion-lente-cloud-meta-v2";
+  const CALENDAR_PENDING_KEY = "orion-lente-calendar-pending-v1";
   const POLL_MS = 30_000;
   const configuredApi = String(window.ORION_LENTE_CONFIG?.apiBase || "").replace(/\/$/, "");
   let apiBase = configuredApi || localStorage.getItem(API_KEY) || "";
@@ -18,6 +19,7 @@
   const logoutButtons = [...document.querySelectorAll("#cloudLogoutBtn, [data-cloud-logout]")];
   const statuses = [...document.querySelectorAll("#cloudStatus, [data-cloud-status]")];
   const token = () => localStorage.getItem(TOKEN_KEY) || "";
+  const calendarPending = () => localStorage.getItem(CALENDAR_PENDING_KEY) === "1";
   const clone = (value) => value == null ? value : structuredClone(value);
   const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
 
@@ -136,7 +138,7 @@
 
   function syncedLabel(updatedAt, calendarOk) {
     const time = updatedAt ? new Date(updatedAt).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" }) : "ahora";
-    return calendarOk === false ? `Nube ${time} \u00b7 Calendar pendiente` : `Sincronizado \u00b7 ${time}`;
+    return calendarOk === false || calendarPending() ? `Nube ${time} \u00b7 Calendar pendiente` : `Sincronizado \u00b7 ${time}`;
   }
 
   async function flush() {
@@ -158,6 +160,8 @@
         body: JSON.stringify({ state, baseVersion: serverVersion }),
       });
       saveMeta(data.state, data.version, data.updatedAt);
+      if (data.calendar?.ok === true) localStorage.removeItem(CALENDAR_PENDING_KEY);
+      else if (data.calendar?.ok === false) localStorage.setItem(CALENDAR_PENDING_KEY, "1");
       if (startedSequence === changeSequence && !pendingState) {
         window.OrionLente?.replaceState(data.state);
       } else {
@@ -223,7 +227,7 @@
       } else {
         saveMeta(data.state, data.version, data.updatedAt);
         window.OrionLente?.replaceState(data.state);
-        setStatus(syncedLabel(data.updatedAt), "ok", "Datos descargados desde la nube");
+        setStatus(syncedLabel(data.updatedAt), calendarPending() ? "warning" : "ok", "Datos descargados desde la nube");
       }
     } catch (error) {
       setStatus(error.message === "unauthorized" ? "Sesion vencida \u00b7 conecta Google" : "Sin conexion \u00b7 usando datos locales", "error");
@@ -259,7 +263,44 @@
     refreshControls();
   }
 
-  window.OrionLenteCloud = { save: queueSave, sync: () => reconcile(true), mergeStates };
+  async function listBackups() {
+    if (!token()) throw new Error("unauthorized");
+    const data = await request("/api/backups");
+    return data.backups || [];
+  }
+
+  async function getBackup(id) {
+    if (!token()) throw new Error("unauthorized");
+    const data = await request(`/api/backups/${encodeURIComponent(id)}`);
+    return data.backup;
+  }
+
+  async function restoreBackup(id) {
+    if (!token()) throw new Error("unauthorized");
+    clearTimeout(timer);
+    if (pendingState) await flush();
+    if (pendingState || saving || reconciling) throw new Error("sync_pending");
+
+    changeSequence += 1;
+    setStatus("Restaurando respaldo\u2026", "working");
+    const data = await request(`/api/backups/${encodeURIComponent(id)}/restore`, { method: "POST" });
+    pendingState = null;
+    localStorage.setItem(CALENDAR_PENDING_KEY, "1");
+    saveMeta(data.state, data.version, data.updatedAt);
+    window.OrionLente?.replaceState(data.state);
+    setStatus("Respaldo restaurado \u00b7 Calendar pendiente", "warning", "Calendar se actualizará en el siguiente guardado normal");
+    return data;
+  }
+
+  window.OrionLenteCloud = {
+    save: queueSave,
+    sync: () => reconcile(true),
+    mergeStates,
+    isConnected: () => Boolean(token()),
+    listBackups,
+    getBackup,
+    restoreBackup,
+  };
   syncButtons.forEach((button) => button.addEventListener("click", syncOrLogin));
   logoutButtons.forEach((button) => button.addEventListener("click", logout));
   window.addEventListener("online", () => token() && reconcile(true));

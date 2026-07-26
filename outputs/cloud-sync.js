@@ -127,12 +127,16 @@
       ...mergedIdeas.filter((idea) => !idea.archivedAt).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || ""))),
       ...mergedIdeas.filter((idea) => idea.archivedAt).sort((a, b) => String(b.archivedAt || "").localeCompare(String(a.archivedAt || ""))),
     ].slice(0, 300);
+    const releases = mergeItems(foundation.releases, local.releases, remote.releases)
+      .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
+      .slice(0, 50);
     return {
       ...remote,
       ...local,
       artists: mergeItems(foundation.artists, local.artists, remote.artists),
       tasks: mergeItems(foundation.tasks, local.tasks, remote.tasks),
       ideas,
+      releases,
       lexicon: mergeItems(foundation.lexicon, local.lexicon, remote.lexicon),
       feed: mergeItems(foundation.feed, local.feed, remote.feed)
         .sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")))

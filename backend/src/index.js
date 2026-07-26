@@ -32,6 +32,11 @@ async function route(request, env) {
     }
     if (url.pathname === "/api/state" && request.method === "GET") return getState(session, request, env);
     if (url.pathname === "/api/state" && request.method === "PUT") return putState(session, request, env);
+    if (url.pathname === "/api/backups" && request.method === "GET") return listBackups(session, request, env);
+    const backupMatch = url.pathname.match(/^\/api\/backups\/(\d+)$/);
+    const restoreMatch = url.pathname.match(/^\/api\/backups\/(\d+)\/restore$/);
+    if (backupMatch && request.method === "GET") return getBackup(session, backupMatch[1], request, env);
+    if (restoreMatch && request.method === "POST") return restoreBackup(session, restoreMatch[1], request, env);
     if (url.pathname === "/api/logout" && request.method === "POST") {
       await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(session.tokenHash).run();
       return json({ ok: true }, 200, request, env);
@@ -194,9 +199,130 @@ async function putState(session, request, env) {
     }
   }
   const updatedAt = new Date().toISOString();
-  await env.DB.prepare("UPDATE users SET state_json = ?, updated_at = ? WHERE email = ?")
-    .bind(JSON.stringify(normalized), updatedAt, session.email).run();
+  const writes = [];
+  if (oldRow?.state_json) {
+    writes.push(env.DB.prepare(`
+      INSERT INTO state_backups (user_email, version, state_json, created_at)
+      VALUES (?, ?, ?, ?)
+    `).bind(session.email, currentVersion, oldRow.state_json, updatedAt));
+  }
+  writes.push(env.DB.prepare("UPDATE users SET state_json = ?, updated_at = ? WHERE email = ?")
+    .bind(JSON.stringify(normalized), updatedAt, session.email));
+  await env.DB.batch(writes);
+  if (oldRow?.state_json) await pruneBackups(session.email, updatedAt, env);
   return json({ ok: true, state: normalized, version: currentVersion + 1, updatedAt, calendar }, 200, request, env);
+}
+
+async function listBackups(session, request, env) {
+  const result = await env.DB.prepare(`
+    SELECT id, version, created_at,
+      COALESCE(json_array_length(state_json, '$.tasks'), 0) AS task_count
+    FROM state_backups
+    WHERE user_email = ?
+    ORDER BY created_at DESC, id DESC
+  `).bind(session.email).all();
+  const backups = (result.results || []).map((row) => ({
+    id: Number(row.id),
+    version: Number(row.version),
+    createdAt: row.created_at,
+    taskCount: Number(row.task_count || 0),
+  }));
+  return json({ backups }, 200, request, env);
+}
+
+async function getBackup(session, id, request, env) {
+  const row = await env.DB.prepare(`
+    SELECT id, version, state_json, created_at
+    FROM state_backups
+    WHERE user_email = ? AND id = ?
+  `).bind(session.email, Number(id)).first();
+  if (!row) return json({ error: "backup_not_found" }, 404, request, env);
+  const state = JSON.parse(row.state_json);
+  return json({
+    backup: {
+      id: Number(row.id),
+      version: Number(row.version),
+      createdAt: row.created_at,
+      taskCount: Array.isArray(state.tasks) ? state.tasks.length : 0,
+      state,
+    },
+  }, 200, request, env);
+}
+
+async function restoreBackup(session, id, request, env) {
+  const backup = await env.DB.prepare(`
+    SELECT id, version, state_json, created_at
+    FROM state_backups
+    WHERE user_email = ? AND id = ?
+  `).bind(session.email, Number(id)).first();
+  if (!backup) return json({ error: "backup_not_found" }, 404, request, env);
+
+  let restored;
+  try { restored = JSON.parse(backup.state_json); }
+  catch { return json({ error: "invalid_backup" }, 422, request, env); }
+  if (!validState(restored)) return json({ error: "invalid_backup" }, 422, request, env);
+
+  const current = await env.DB.prepare("SELECT state_json, state_version, updated_at FROM users WHERE email = ?")
+    .bind(session.email).first();
+  const currentVersion = Number(current?.state_version || 0);
+  const claimed = await env.DB.prepare(`
+    UPDATE users SET state_version = state_version + 1
+    WHERE email = ? AND state_version = ?
+  `).bind(session.email, currentVersion).run();
+  if (!claimed.meta?.changes) {
+    return json({ error: "version_conflict" }, 409, request, env);
+  }
+
+  const updatedAt = new Date().toISOString();
+  const writes = [];
+  if (current?.state_json) {
+    writes.push(env.DB.prepare(`
+      INSERT INTO state_backups (user_email, version, state_json, created_at)
+      VALUES (?, ?, ?, ?)
+    `).bind(session.email, currentVersion, current.state_json, updatedAt));
+  }
+  writes.push(env.DB.prepare("UPDATE users SET state_json = ?, updated_at = ? WHERE email = ?")
+    .bind(backup.state_json, updatedAt, session.email));
+  await env.DB.batch(writes);
+  if (current?.state_json) await pruneBackups(session.email, updatedAt, env);
+
+  return json({
+    ok: true,
+    state: restored,
+    version: currentVersion + 1,
+    updatedAt,
+    restoredFrom: Number(backup.id),
+    calendar: { ok: false, reason: "restore_deferred" },
+  }, 200, request, env);
+}
+
+async function pruneBackups(email, now, env) {
+  await env.DB.prepare(`
+    DELETE FROM state_backups
+    WHERE user_email = ?
+      AND id NOT IN (
+        SELECT id FROM (
+          SELECT id
+          FROM state_backups
+          WHERE user_email = ?
+            AND julianday(created_at) >= julianday(?, '-24 hours')
+          ORDER BY created_at DESC, id DESC
+          LIMIT 20
+        )
+        UNION
+        SELECT id FROM (
+          SELECT id,
+            ROW_NUMBER() OVER (
+              PARTITION BY substr(created_at, 1, 10)
+              ORDER BY created_at DESC, id DESC
+            ) AS day_rank
+          FROM state_backups
+          WHERE user_email = ?
+            AND julianday(created_at) >= julianday(?, '-30 days')
+        )
+        WHERE day_rank = 1
+      )
+  `).bind(email, email, now, email, now).run();
 }
 
 function validState(value) {

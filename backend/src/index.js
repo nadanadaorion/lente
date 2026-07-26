@@ -215,7 +215,8 @@ async function syncCalendar(previous, incoming, session, env) {
   for (const task of newTasks) {
     const old = oldTasks.get(String(task.id));
     oldTasks.delete(String(task.id));
-    const shouldExist = Boolean(task.due) && task.status !== "done";
+    // Las tareas hechas conservan su evento: son registro de lo que ocurrió.
+    const shouldExist = Boolean(task.due);
     const eventId = task.calendarEventId || old?.calendarEventId;
     if (!shouldExist) {
       if (eventId) await calendarDelete(calendarId, eventId, accessToken);
@@ -238,19 +239,33 @@ async function syncCalendar(previous, incoming, session, env) {
 }
 
 function calendarSignature(task) {
-  return JSON.stringify([task.title, task.due, task.status, task.assignee, task.artistId, task.area, task.priority]);
+  return JSON.stringify([task.title, task.due, task.start, task.end, task.status, task.assignee, task.artistId, task.area, task.priority]);
+}
+
+// Las marcas de la app son locales ("YYYY-MM-DDTHH:mm"); se envían con timeZone
+// para que Google las interprete en la zona del usuario.
+function calendarTiming(task, timeZone) {
+  if (task.start) {
+    const start = task.start.length === 16 ? `${task.start}:00` : task.start;
+    const endStamp = task.end && task.end > task.start ? task.end : null;
+    const end = endStamp
+      ? (endStamp.length === 16 ? `${endStamp}:00` : endStamp)
+      : new Date(new Date(`${start}Z`).getTime() + 60 * 60 * 1000).toISOString().slice(0, 19);
+    return { start: { dateTime: start, timeZone }, end: { dateTime: end, timeZone } };
+  }
+  const end = new Date(`${task.due}T12:00:00Z`);
+  end.setUTCDate(end.getUTCDate() + 1);
+  return { start: { date: task.due }, end: { date: end.toISOString().slice(0, 10) } };
 }
 
 function calendarBody(task, state) {
   const project = (state.artists || []).find((item) => item.id === task.artistId)?.name || "Sin proyecto";
-  const end = new Date(`${task.due}T12:00:00Z`);
-  end.setUTCDate(end.getUTCDate() + 1);
-  const endDate = end.toISOString().slice(0, 10);
+  const timeZone = state.timeZone || "America/Mexico_City";
+  const timing = calendarTiming(task, timeZone);
   return {
     summary: `[ORI♡N LENTE] ${task.title}`,
     description: [`Proyecto: ${project}`, `Frente: ${task.area || "—"}`, `Responsable: ${task.assignee || "—"}`, "Creado desde ORI♡N LENTE"].join("\n"),
-    start: { date: task.due },
-    end: { date: endDate },
+    ...timing,
     extendedProperties: { private: { orionTaskId: String(task.id) } },
   };
 }

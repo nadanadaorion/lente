@@ -42,6 +42,7 @@
         "musica", "mezclar", "mezcla", "master", "masterizar", "grabar", "grabacion", "sesion", "demo",
         "cancion", "track", "vocal", "voces", "tirar voces", "beat", "estudio", "ensayo", "producir",
         "produccion musical", "componer", "composicion", "afinar", "bounce", "stem", "instrumental",
+        "letra", "letras", "lirica", "topline", "coro", "verso", "arreglo", "maqueta",
       ],
       "Diseño": [
         "diseno", "disenar", "portada", "arte", "artwork", "poster", "afiche", "logo", "foto", "fotografia",
@@ -264,6 +265,201 @@
     return "low";
   }
 
+  const NUMBER_WORDS = {
+    un: 1, una: 1, uno: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5, seis: 6, siete: 7, ocho: 8,
+    nueve: 9, diez: 10, once: 11, doce: 12, quince: 15, veinte: 20, treinta: 30, cuarenta: 40,
+    "cuarenta y cinco": 45, sesenta: 60, noventa: 90,
+  };
+
+  function wordToNumber(value) {
+    const clean = normalize(value);
+    if (!clean) return null;
+    if (/^\d+$/.test(clean)) return Number(clean);
+    return Object.prototype.hasOwnProperty.call(NUMBER_WORDS, clean) ? NUMBER_WORDS[clean] : null;
+  }
+
+  // "a las 3" sin meridiano: 1-7 se asume tarde, 8-12 se asume mañana.
+  function applyMeridiem(hour, meridiem) {
+    if (meridiem === "pm") return hour === 12 ? 12 : hour + 12;
+    if (meridiem === "am") return hour === 12 ? 0 : hour;
+    if (hour >= 1 && hour <= 7) return hour + 12;
+    return hour;
+  }
+
+  function readMeridiem(value) {
+    const clean = normalize(value);
+    if (/^(pm|p m|de la tarde|de la noche)$/.test(clean)) return "pm";
+    if (/^(am|a m|de la manana)$/.test(clean)) return "am";
+    return null;
+  }
+
+  const CLOCK = "(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm|a\\s*m|p\\s*m|de\\s+la\\s+manana|de\\s+la\\s+tarde|de\\s+la\\s+noche)?";
+
+  function clockToMinutes(hourText, minuteText, meridiemText) {
+    const rawHour = Number(hourText);
+    if (!Number.isFinite(rawHour) || rawHour > 23) return null;
+    const minute = minuteText ? Number(minuteText) : 0;
+    if (minute > 59) return null;
+    return applyMeridiem(rawHour, readMeridiem(meridiemText || "")) * 60 + minute;
+  }
+
+  // Duración explícita: "de dos horas", "de media hora", "de 90 minutos".
+  function parseDuration(text) {
+    const input = normalize(text);
+    if (/\bde\s+media\s+hora\b|\bmedia\s+hora\b/.test(input)) return 30;
+    if (/\bde\s+un\s+cuarto\s+de\s+hora\b|\bcuarto\s+de\s+hora\b/.test(input)) return 15;
+    if (/\bhora\s+y\s+media\b/.test(input)) return 90;
+    let match = input.match(/\b(?:de\s+|dura(?:cion)?\s+(?:de\s+)?)?(\d+|un|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)\s*(?:horas?|hrs?|h)\b/);
+    if (match) {
+      const hours = wordToNumber(match[1]);
+      if (hours) return hours * 60;
+    }
+    match = input.match(/\b(?:de\s+|dura(?:cion)?\s+(?:de\s+)?)?(\d+|quince|veinte|treinta|cuarenta|sesenta|noventa)\s*(?:minutos?|mins?|min)\b/);
+    if (match) {
+      const minutes = wordToNumber(match[1]);
+      if (minutes) return minutes;
+    }
+    return null;
+  }
+
+  function mentionsNow(text) {
+    return /\b(en\s+este\s+momento|ahora\s+mismo|ahorita|justo\s+ahora|empezando\s+ya|arrancando\s+ya)\b/.test(normalize(text));
+  }
+
+  // Estado explícito pedido en la frase: "en espera de…", "en este momento…".
+  function detectStatusHint(text, dictionary = []) {
+    const input = normalize(text);
+    if (/\b(en\s+espera\s+de|a\s+la\s+espera\s+de|esperando|pendiente\s+de\s+(?:respuesta|confirmacion|aprobacion|que)|bloqueado\s+por|detenido\s+por|trabado\s+por)\b/.test(input)) {
+      return { value: "waiting", source: "builtin" };
+    }
+    if (mentionsNow(text) || /\b(estoy\s+en|arrancando|empezando|ya\s+empece|ya\s+arranque|en\s+curso)\b/.test(input)) {
+      return { value: "doing", source: "builtin" };
+    }
+    const learned = bestLearned(text, "status", dictionary);
+    return learned ? { value: learned.value, source: "learned" } : null;
+  }
+
+  // Devuelve minutos desde medianoche para inicio/fin, y duración cuando se declara.
+  function parseSchedule(text) {
+    const input = normalize(text);
+    const duration = parseDuration(input);
+
+    const range = input.match(new RegExp(`\\b(?:de|desde)\\s+${CLOCK}\\s+(?:a|hasta)\\s+(?:las\\s+)?${CLOCK}`));
+    if (range) {
+      const start = clockToMinutes(range[1], range[2], range[3]);
+      let end = clockToMinutes(range[4], range[5], range[6]);
+      // "de 4 a 6" sin meridiano: el fin hereda la franja del inicio.
+      if (start !== null && end !== null && !range[6] && end < start) end += 12 * 60;
+      if (start !== null && end !== null && end > start) {
+        return { startMinutes: start, endMinutes: end, durationMinutes: end - start, isNow: false };
+      }
+    }
+
+    const at = input.match(new RegExp(`\\ba\\s+las?\\s+${CLOCK}`)) || input.match(new RegExp(`(?:^|\\s)${CLOCK}(?=\\s|$)`));
+    if (at && /\b(?:a\s+las?\s+\d|\d\s*(?::\d{2}|am|pm|hrs))/.test(input)) {
+      const start = clockToMinutes(at[1], at[2], at[3]);
+      if (start !== null) {
+        return {
+          startMinutes: start,
+          endMinutes: duration ? start + duration : null,
+          durationMinutes: duration,
+          isNow: false,
+        };
+      }
+    }
+
+    if (mentionsNow(input)) {
+      return { startMinutes: null, endMinutes: null, durationMinutes: duration, isNow: true };
+    }
+    return duration ? { startMinutes: null, endMinutes: null, durationMinutes: duration, isNow: false } : null;
+  }
+
+  // Fragmentos que describen cuándo/para quién ocurre algo: se muestran en la
+  // tarjeta como campos propios, así que sobran dentro del título.
+  const SUMMARY_STRIPPERS = [
+    // Encabezados de estado.
+    /^(?:ya\s+)?(?:estoy\s+en|en)\s+espera\s+de\s+(?:la|el|los|las|una?|un)?\s*/i,
+    /^a\s+la\s+espera\s+de\s+(?:la|el|los|las|una?|un)?\s*/i,
+    /^esperando\s+(?:la|el|los|las|una?|un|a|por)?\s*/i,
+    /^pendiente\s+de\s+(?:la|el|los|las|una?|un)?\s*/i,
+    // Horas, duraciones y momentos.
+    /\b(?:de|desde)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s+(?:a|hasta)\s+(?:las\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?/gi,
+    /\ba\s+las?\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?|horas?)?(?:\s+de\s+la\s+(?:mañana|tarde|noche))?/gi,
+    /\b\d{1,2}:\d{2}\s*(?:am|pm)?/gi,
+    /\b\d{1,2}\s*(?:am|pm)\b/gi,
+    /\bde\s+(?:media\s+hora|un\s+cuarto\s+de\s+hora|hora\s+y\s+media)\b/gi,
+    /\bde\s+(?:\d+|un|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)\s*(?:horas?|hrs?)\b/gi,
+    /\bde\s+(?:\d+|quince|veinte|treinta|cuarenta|sesenta|noventa)\s*(?:minutos?|mins?)\b/gi,
+    /\b(?:en\s+este\s+momento|ahora\s+mismo|ahorita|justo\s+ahora|en\s+curso)\b/gi,
+    // Muletillas de encargo.
+    /^(?:tengo(?:\s+que)?|hay\s+que|necesito(?:\s+que)?|debo|tenemos\s+que|quiero|vamos\s+a|me\s+toca)\s+/i,
+    /\bpor\s+favor\b/gi,
+  ];
+
+  // Artículo + sustantivo genérico que no aporta ("un archivo de letra" → "archivo de letra").
+  const LEADING_ARTICLE = /^(?:el|la|los|las|un|una|unos|unas)\s+/i;
+  // Verbo de encargo al inicio: se elimina porque toda tarjeta ya es un pendiente.
+  const LEADING_VERB = /^(?:crear|hacer|realizar|armar|preparar|generar|elaborar|producir|montar|redactar|escribir|enviar|mandar|revisar|editar|grabar|disenar|diseñar|gestionar|organizar|agendar|coordinar|subir|entregar|definir|terminar|cerrar)\s+/i;
+  // "el single «X»" → «X»: el tipo de release es ruido cuando el nombre va entrecomillado.
+  const RELEASE_NOUN = /\b(?:el\s+|la\s+|los\s+|las\s+|un\s+|una\s+)?(?:single|sencillo|track|tema|album|álbum|ep|disco|video|videoclip)\s+(?=[«"“][^»"”]+[»"”])/gi;
+  // Cola que queda colgando al quitar el artista: "…video para el single [de Roxo]".
+  const DANGLING_RELEASE = /\s+\b(?:de|del|para|en)\s+(?:el\s+|la\s+|los\s+|las\s+)?(?:proximo|próximo|nuevo|siguiente)?\s*(?:single|sencillo|track|tema|album|álbum|ep|disco)\s*$/i;
+  // Preposición huérfana al final: "…portada de", "…mezcla para".
+  const DANGLING_PREPOSITION = /\s+(?:de|del|para|con|en|a|por|sobre)\s*$/i;
+
+  function tidy(value) {
+    return String(value || "")
+      .replace(/\s{2,}/g, " ")
+      .replace(/\s+([,.;:])/g, "$1")
+      .replace(/^[\s,.;:·\-–—]+|[\s,.;:·\-–—]+$/g, "")
+      .trim();
+  }
+
+  /**
+   * Reescribe una frase a un título corto y legible: quita fechas, horas,
+   * artista, responsable y muletillas, y deja una frase nominal coherente.
+   */
+  function summarize(text, options = {}) {
+    const names = (options.names || []).filter(Boolean);
+    const assignee = options.assignee || "";
+    const stripDates = options.stripDates;
+    let value = String(text || "").trim();
+    if (!value) return "";
+
+    if (typeof stripDates === "function") value = stripDates(value);
+
+    for (const rule of SUMMARY_STRIPPERS) value = value.replace(rule, " ");
+
+    // El artista y el responsable ya se muestran en la tarjeta.
+    for (const name of [...names, assignee]) {
+      if (!name) continue;
+      const escaped = String(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      value = value.replace(new RegExp(`\\s*\\b(?:de|para|con|del)\\s+${escaped}\\b`, "gi"), " ");
+      value = value.replace(new RegExp(`\\s*\\b${escaped}\\b\\s*$`, "gi"), " ");
+    }
+
+    value = value.replace(RELEASE_NOUN, "");
+    value = tidy(value);
+    value = value.replace(LEADING_VERB, "");
+    value = tidy(value);
+    value = value.replace(LEADING_ARTICLE, "");
+    value = tidy(value);
+    // Se aplican al final y en bucle: quitar una cola puede destapar la siguiente.
+    for (let pass = 0; pass < 3; pass += 1) {
+      const before = value;
+      value = tidy(value.replace(DANGLING_RELEASE, ""));
+      value = tidy(value.replace(DANGLING_PREPOSITION, ""));
+      if (value === before) break;
+    }
+
+    // Corta en el límite natural más cercano si quedó largo.
+    const words = value.split(/\s+/).filter(Boolean);
+    if (words.length > 10) value = tidy(words.slice(0, 10).join(" ")) + "…";
+
+    if (!value) return "";
+    return value[0].toLocaleUpperCase("es") + value.slice(1);
+  }
+
   root.OrionLenteNLP = {
     BUILTINS,
     normalize,
@@ -274,6 +470,10 @@
     detectIntent,
     detectArea,
     detectProject,
+    detectStatusHint,
+    parseSchedule,
+    parseDuration,
+    summarize,
     confidence,
   };
 })(typeof globalThis !== "undefined" ? globalThis : window);

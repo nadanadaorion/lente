@@ -353,11 +353,22 @@ async function syncCalendar(previous, incoming, session, env) {
     }
     const changed = !old || calendarSignature(old) !== calendarSignature(task);
     if (eventId && changed) {
-      task.calendarEventId = await calendarUpdate(calendarId, eventId, task, incoming, accessToken);
+      const event = await calendarUpdate(calendarId, eventId, task, incoming, accessToken, task.meetingRequested && task.start && !taskMeetingLink(task));
+      applyCalendarEvent(task, event);
     } else if (!eventId) {
-      task.calendarEventId = await calendarCreate(calendarId, task, incoming, accessToken);
+      const event = await calendarCreate(calendarId, task, incoming, accessToken);
+      applyCalendarEvent(task, event);
     } else {
       task.calendarEventId = eventId;
+      if (task.meetingRequested && task.start && !taskMeetingLink(task)) {
+        let event = await calendarGet(calendarId, eventId, accessToken);
+        if (!event.conferenceData) {
+          event = await calendarUpdate(calendarId, eventId, task, incoming, accessToken, true);
+        } else {
+          event = await resolveCalendarMeeting(calendarId, event, accessToken);
+        }
+        applyCalendarEvent(task, event);
+      }
     }
   }
   for (const old of oldTasks.values()) {
@@ -367,7 +378,20 @@ async function syncCalendar(previous, incoming, session, env) {
 }
 
 function calendarSignature(task) {
-  return JSON.stringify([task.title, task.due, task.start, task.end, task.status, task.assignee, task.artistId, task.area, task.priority]);
+  return JSON.stringify([
+    task.title,
+    task.due,
+    task.start,
+    task.end,
+    task.status,
+    task.assignee,
+    task.artistId,
+    task.area,
+    task.priority,
+    task.meetingRequested === true,
+    task.meetingRequestId || "",
+    task.endEstimated === true,
+  ]);
 }
 
 // Las marcas de la app son locales ("YYYY-MM-DDTHH:mm"); se envían con timeZone
@@ -386,39 +410,109 @@ function calendarTiming(task, timeZone) {
   return { start: { date: task.due }, end: { date: end.toISOString().slice(0, 10) } };
 }
 
-function calendarBody(task, state) {
+function calendarBody(task, state, requestConference = false) {
   const project = (state.artists || []).find((item) => item.id === task.artistId)?.name || "Sin proyecto";
   const timeZone = state.timeZone || "America/Mexico_City";
   const timing = calendarTiming(task, timeZone);
-  return {
-    summary: `[ORI♡N LENTE] ${task.title}`,
-    description: [`Proyecto: ${project}`, `Frente: ${task.area || "—"}`, `Responsable: ${task.assignee || "—"}`, "Creado desde ORI♡N LENTE"].join("\n"),
+  const body = {
+    summary: task.meetingRequested ? task.title : `[ORI♡N LENTE] ${task.title}`,
+    description: [
+      `Proyecto: ${project}`,
+      `Frente: ${task.area || "—"}`,
+      `Responsable: ${task.assignee || "—"}`,
+      task.endEstimated ? "Duración: estimada (1 hora)" : "",
+      "Creado desde ORI♡N LENTE",
+    ].filter(Boolean).join("\n"),
     ...timing,
     extendedProperties: { private: { orionTaskId: String(task.id) } },
   };
+  if (requestConference) {
+    body.conferenceData = {
+      createRequest: {
+        requestId: String(task.meetingRequestId || `orion-${task.id}`),
+        conferenceSolutionKey: { type: "hangoutsMeet" },
+      },
+    };
+  }
+  return body;
 }
 
 async function calendarCreate(calendarId, task, state, accessToken) {
-  const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`, {
+  const requestConference = task.meetingRequested === true && Boolean(task.start);
+  const suffix = requestConference ? "?conferenceDataVersion=1" : "";
+  const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events${suffix}`, {
     method: "POST",
     headers: googleHeaders(accessToken),
-    body: JSON.stringify(calendarBody(task, state)),
+    body: JSON.stringify(calendarBody(task, state, requestConference)),
   });
   if (!response.ok) throw new Error(`Calendar create ${response.status}`);
-  return (await response.json()).id;
+  const event = await response.json();
+  return requestConference ? resolveCalendarMeeting(calendarId, event, accessToken) : event;
 }
 
-async function calendarUpdate(calendarId, eventId, task, state, accessToken) {
-  const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${encodeURIComponent(eventId)}`, {
-    method: "PUT",
+async function calendarUpdate(calendarId, eventId, task, state, accessToken, requestConference = false) {
+  const suffix = task.meetingRequested ? "?conferenceDataVersion=1" : "";
+  const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${encodeURIComponent(eventId)}${suffix}`, {
+    method: "PATCH",
     headers: googleHeaders(accessToken),
-    body: JSON.stringify(calendarBody(task, state)),
+    body: JSON.stringify(calendarBody(task, state, requestConference)),
   });
   if (response.status === 404 || response.status === 410) {
     return calendarCreate(calendarId, task, state, accessToken);
   }
   if (!response.ok) throw new Error(`Calendar update ${response.status}`);
-  return eventId;
+  const event = await response.json();
+  return requestConference ? resolveCalendarMeeting(calendarId, event, accessToken) : event;
+}
+
+async function calendarGet(calendarId, eventId, accessToken) {
+  const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${encodeURIComponent(eventId)}`, {
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+  if (!response.ok) throw new Error(`Calendar get ${response.status}`);
+  return response.json();
+}
+
+async function resolveCalendarMeeting(calendarId, event, accessToken) {
+  let current = event;
+  const waits = [200, 400, 800, 1200, 1600];
+  for (const delay of waits) {
+    if (calendarMeetingLink(current) || current?.conferenceData?.createRequest?.status?.statusCode === "failure") break;
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    current = await calendarGet(calendarId, current.id, accessToken);
+  }
+  return current;
+}
+
+function applyCalendarEvent(task, event) {
+  task.calendarEventId = event.id || task.calendarEventId;
+  if (!task.meetingRequested) return;
+  if (!task.start) {
+    task.meetingStatus = "requested";
+    return;
+  }
+  const link = calendarMeetingLink(event);
+  if (link) {
+    const links = (Array.isArray(task.links) ? task.links : []).filter((item) => !isGoogleMeetUrl(item?.url));
+    task.links = [...links.slice(0, 19), { url: link, label: "Google Meet" }];
+    task.meetingStatus = "ready";
+    return;
+  }
+  task.meetingStatus = event?.conferenceData?.createRequest?.status?.statusCode === "failure" ? "failed" : "pending";
+}
+
+function calendarMeetingLink(event) {
+  if (isGoogleMeetUrl(event?.hangoutLink)) return event.hangoutLink;
+  return event?.conferenceData?.entryPoints?.find((entry) => entry.entryPointType === "video" && isGoogleMeetUrl(entry.uri))?.uri || "";
+}
+
+function taskMeetingLink(task) {
+  return (Array.isArray(task.links) ? task.links : []).find((link) => isGoogleMeetUrl(link?.url))?.url || "";
+}
+
+function isGoogleMeetUrl(value) {
+  try { return new URL(String(value || "")).hostname === "meet.google.com"; }
+  catch { return false; }
 }
 
 async function calendarDelete(calendarId, eventId, accessToken) {

@@ -414,6 +414,60 @@
     return duration ? { startMinutes: null, endMinutes: null, durationMinutes: duration, isNow: false, offsetMinutes: null } : null;
   }
 
+  const MEETING_WORDS = "(?:reunion|junta|llamada|videollamada|video\\s+llamada|meet|zoom)";
+  const MEETING_ACTIONS = "(?:crear|crea|creame|crees|agendar|agenda|agendame|agendes|programar|programa|programame|programes|organizar|organiza|organizame|organices|generar|genera|generame|generes)";
+
+  function isMeetingMention(text) {
+    return new RegExp(`\\b${MEETING_WORDS}\\b`).test(normalize(text));
+  }
+
+  // Una mención ("Reunión con Vabe") solo registra el compromiso. El Meet se
+  // solicita únicamente si la frase empieza con una orden inequívoca.
+  function isMeetingRequest(text) {
+    const input = normalize(text);
+    const politePrefix = "(?:por\\s+favor\\s+)?(?:(?:quiero|quisiera|necesito)\\s+)?(?:(?:que\\s+)?me\\s+)?(?:(?:puedes|podrias)\\s+)?";
+    return new RegExp(`^${politePrefix}${MEETING_ACTIONS}\\s+(?:una?\\s+|la\\s+|el\\s+)?${MEETING_WORDS}\\b`).test(input);
+  }
+
+  function parseMeetingSchedule(text) {
+    const schedule = parseSchedule(text);
+    if (!schedule) return null;
+    const needsEstimate = isMeetingRequest(text) && schedule.startMinutes !== null && schedule.endMinutes === null;
+    return needsEstimate
+      ? { ...schedule, endMinutes: schedule.startMinutes + 60, durationMinutes: 60, endEstimated: true }
+      : { ...schedule, endEstimated: false };
+  }
+
+  function meetingParticipant(text) {
+    const value = String(text || "");
+    const match = value.match(/\bcon\s+(.+?)(?=\s+(?:sobre\b|acerca\s+de\b|para\s+(?:hablar|revisar|ver|tratar|comentar|hoy|mañana|pasado|el\s|la\s|\d)|hoy\b|mañana\b|pasado\s+mañana\b|a\s+las?\b|con\s+duraci[oó]n\b|de\s+(?:\d+|un|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)\s+(?:horas?|hrs?|minutos?|mins?))|[,;.?!]|$)/i);
+    return match ? tidy(match[1]).replace(/^(?:el|la|los|las)\s+/i, "") : "";
+  }
+
+  function meetingTitle(text, options = {}) {
+    const value = String(text || "");
+    const participant = tidy(options.participant || meetingParticipant(value));
+    const topicMatch = value.match(/\b(?:sobre|acerca\s+de)\s+(.+)$/i)
+      || value.match(/\bpara\s+(?:hablar|revisar|ver|tratar|comentar)\s+(?:de\s+)?(.+)$/i);
+    let topic = topicMatch
+      ? summarize(topicMatch[1], { stripDates: options.stripDates })
+      : "";
+    topic = tidy(topic.replace(/^(?:su|sus)\s+/i, ""))
+      .replace(/\b(?:ep|lp|cd|dvd)\b/gi, (word) => word.toUpperCase());
+    if (topic) topic = topic[0].toLocaleUpperCase("es") + topic.slice(1);
+    const owner = participant.toLocaleUpperCase("es-MX");
+    if (owner && topic) return `${owner} ${topic}`;
+
+    const input = normalize(value);
+    const kind = /\bllamada\b/.test(input)
+      ? "Llamada"
+      : /\b(?:meet|zoom|videollamada|video llamada)\b/.test(input)
+        ? "Videollamada"
+        : "Reunión";
+    if (owner) return `${kind} con ${owner}`;
+    return topic || kind;
+  }
+
   // Fragmentos que describen cuándo/para quién ocurre algo: se muestran en la
   // tarjeta como campos propios, así que sobran dentro del título.
   const SUMMARY_STRIPPERS = [
@@ -431,6 +485,7 @@
     /\ba\s+las?\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?|horas?)?(?:\s+de\s+la\s+(?:mañana|tarde|noche))?/gi,
     /\b\d{1,2}:\d{2}\s*(?:am|pm)?/gi,
     /\b\d{1,2}\s*(?:am|pm)\b/gi,
+    /\b(?:con\s+)?duraci[oó]n\s+(?:de\s+)?(?:\d+|un|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)\s*(?:horas?|hrs?|h|minutos?|mins?|min)\b/gi,
     /\bde\s+(?:media\s+hora|un\s+cuarto\s+de\s+hora|hora\s+y\s+media)\b/gi,
     /\bde\s+(?:\d+|un|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)\s*(?:horas?|hrs?)\b/gi,
     /\bde\s+(?:\d+|quince|veinte|treinta|cuarenta|sesenta|noventa)\s*(?:minutos?|mins?)\b/gi,
@@ -559,6 +614,11 @@
     detectStatusHint,
     parseSchedule,
     parseDuration,
+    isMeetingMention,
+    isMeetingRequest,
+    parseMeetingSchedule,
+    meetingParticipant,
+    meetingTitle,
     normalizeLink,
     extractLinks,
     summarize,

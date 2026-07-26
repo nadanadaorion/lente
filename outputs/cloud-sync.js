@@ -112,6 +112,15 @@
       else {
         result = { ...there, ...here };
         if (!result.calendarEventId && there.calendarEventId) result.calendarEventId = there.calendarEventId;
+        if (there.meetingStatus === "ready") {
+          result.meetingStatus = "ready";
+          const meetLinks = (there.links || []).filter((link) => {
+            try { return new URL(link?.url).hostname === "meet.google.com"; }
+            catch { return false; }
+          });
+          const links = [...(here.links || []), ...meetLinks];
+          result.links = links.filter((link, index) => link?.url && links.findIndex((candidate) => candidate?.url === link.url) === index);
+        }
       }
       if (result) merged.push(clone(result));
     });

@@ -326,17 +326,25 @@
     return /\b(en\s+este\s+momento|ahora\s+mismo|ahorita|justo\s+ahora|empezando\s+ya|arrancando\s+ya)\b/.test(normalize(text));
   }
 
+  // Bloqueo externo: la tarea no avanza hasta que responda alguien más.
+  // La preposición que sigue es opcional para tolerar "en espera:", "a la espera del", etc.
+  const WAITING_PATTERN = /\b(?:en\s+espera|a\s+la\s+espera|esperando|esperamos|en\s+pausa|pausad[oa]|en\s+standby|standby|congelad[oa]|bloquead[oa]|detenid[oa]|trabad[oa]|frenad[oa]|atorad[oa]|sin\s+respuesta)\b/;
+  // "Pendiente de X" solo es espera cuando X es algo que depende de terceros.
+  const WAITING_PENDING = /\bpendiente\s+de(?:l)?\s+(?:que|respuesta|contestacion|confirmacion|aprobacion|autorizacion|feedback|revision|firma|pago|cotizacion|entrega|envio|master|aprobar|confirmar)\b/;
+  const DOING_PATTERN = /\b(?:en\s+curso|estoy\s+en|trabajando\s+en|arrancando|empezando|ya\s+empece|ya\s+arranque|ya\s+comence)\b/;
+
   // Estado explícito pedido en la frase: "en espera de…", "en este momento…".
   function detectStatusHint(text, dictionary = []) {
     const input = normalize(text);
-    if (/\b(en\s+espera\s+de|a\s+la\s+espera\s+de|esperando|pendiente\s+de\s+(?:respuesta|confirmacion|aprobacion|que)|bloqueado\s+por|detenido\s+por|trabado\s+por)\b/.test(input)) {
+    const learned = bestLearned(text, "status", dictionary);
+    if (learned) return { value: learned.value, source: "learned" };
+    if (WAITING_PATTERN.test(input) || WAITING_PENDING.test(input)) {
       return { value: "waiting", source: "builtin" };
     }
-    if (mentionsNow(text) || /\b(estoy\s+en|arrancando|empezando|ya\s+empece|ya\s+arranque|en\s+curso)\b/.test(input)) {
+    if (mentionsNow(text) || DOING_PATTERN.test(input)) {
       return { value: "doing", source: "builtin" };
     }
-    const learned = bestLearned(text, "status", dictionary);
-    return learned ? { value: learned.value, source: "learned" } : null;
+    return null;
   }
 
   // Devuelve minutos desde medianoche para inicio/fin, y duración cuando se declara.
@@ -377,11 +385,11 @@
   // Fragmentos que describen cuándo/para quién ocurre algo: se muestran en la
   // tarjeta como campos propios, así que sobran dentro del título.
   const SUMMARY_STRIPPERS = [
-    // Encabezados de estado.
-    /^(?:ya\s+)?(?:estoy\s+en|en)\s+espera\s+de\s+(?:la|el|los|las|una?|un)?\s*/i,
-    /^a\s+la\s+espera\s+de\s+(?:la|el|los|las|una?|un)?\s*/i,
-    /^esperando\s+(?:la|el|los|las|una?|un|a|por)?\s*/i,
-    /^pendiente\s+de\s+(?:la|el|los|las|una?|un)?\s*/i,
+    // Encabezado de estado: la columna ya dice en qué estado está la tarea.
+    // Tolera ":", "de", "del", "por" y el artículo que venga después.
+    // "Sin respuesta del sello" → "Respuesta del sello": solo sobra la negación.
+    /^\s*sin\s+(?=respuesta\b)/i,
+    /^\s*(?:ya\s+)?(?:estoy\s+)?(?:en\s+espera|a\s+la\s+espera|esperando|esperamos|en\s+pausa|pausad[oa]|en\s+standby|standby|congelad[oa]|bloquead[oa]|detenid[oa]|trabad[oa]|frenad[oa]|atorad[oa]|pendiente|en\s+curso|trabajando\s+en)\b[\s:,;.–—-]*(?:de\s+l[oa]s?|del|de|por|a)?\s*(?:l[oa]s?\s+|un[oa]?s?\s+)?/i,
     // Horas, duraciones y momentos.
     /\b(?:de|desde)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s+(?:a|hasta)\s+(?:las\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?/gi,
     /\ba\s+las?\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|hrs?|horas?)?(?:\s+de\s+la\s+(?:mañana|tarde|noche))?/gi,

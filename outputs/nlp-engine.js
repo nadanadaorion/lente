@@ -459,6 +459,48 @@
       .trim();
   }
 
+  const MARKDOWN_LINK = /\[([^\]\n]{1,80})\]\((https?:\/\/[^\s)]+)\)/gi;
+  const PLAIN_URL = /https?:\/\/[^\s<>"'()[\]]+/gi;
+
+  function normalizeLink(link) {
+    const rawUrl = String(link?.url || "").trim().replace(/[.,;:!?]+$/g, "");
+    if (!rawUrl) return null;
+    try {
+      const parsed = new URL(rawUrl);
+      if (!["http:", "https:"].includes(parsed.protocol)) return null;
+      const url = parsed.href;
+      const domain = parsed.hostname.replace(/^www\./i, "");
+      const label = String(link?.label || domain).trim().slice(0, 80) || domain;
+      return { url, label };
+    } catch {
+      return null;
+    }
+  }
+
+  function extractLinks(text) {
+    const links = [];
+    const seen = new Set();
+    const add = (url, label = "") => {
+      const link = normalizeLink({ url, label });
+      if (!link || seen.has(link.url)) return;
+      seen.add(link.url);
+      links.push(link);
+    };
+    let value = String(text || "");
+    value = value.replace(MARKDOWN_LINK, (_, label, url) => {
+      add(url, label);
+      return " ";
+    });
+    value = value.replace(PLAIN_URL, (url) => {
+      add(url);
+      return " ";
+    });
+    return {
+      text: tidy(value),
+      links: links.slice(0, 20),
+    };
+  }
+
   /**
    * Reescribe una frase a un título corto y legible: quita fechas, horas,
    * artista, responsable y muletillas, y deja una frase nominal coherente.
@@ -517,6 +559,8 @@
     detectStatusHint,
     parseSchedule,
     parseDuration,
+    normalizeLink,
+    extractLinks,
     summarize,
     confidence,
   };

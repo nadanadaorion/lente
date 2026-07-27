@@ -12,3 +12,6 @@ database_id = "3efd4e17-6702-4ca2-beed-4ffde6035d8c"
 FRONTEND_URL = "https://nadanadaorion.github.io/lente/"
 WORKER_URL = "https://orion-lente-api.terrterreros.workers.dev"
 CALENDAR_ID = "primary"
+# Tope de llamadas a Google Calendar por guardado (el límite real de un Worker es ~50
+# subpeticiones salientes). Lo que no cabe se reintenta en el siguiente guardado.
+CALENDAR_BUDGET = "40"

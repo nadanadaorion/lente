@@ -191,8 +191,9 @@ async function putState(session, request, env) {
   let normalized = incoming;
   if (session.encryptedRefreshToken) {
     try {
-      normalized = await syncCalendar(previous, incoming, session, env);
-      calendar = { ok: true };
+      const result = await syncCalendar(incoming, session, env);
+      normalized = { ...incoming, tasks: result.tasks };
+      calendar = result.pending > 0 ? { ok: false, reason: "partial", pending: result.pending } : { ok: true };
     } catch (error) {
       console.error("Calendar sync failed", error);
       calendar = { ok: false, reason: "sync_failed" };
@@ -273,6 +274,19 @@ async function restoreBackup(session, id, request, env) {
     return json({ error: "version_conflict" }, 409, request, env);
   }
 
+  let calendar = { ok: false, reason: "not_connected" };
+  let normalized = restored;
+  if (session.encryptedRefreshToken) {
+    try {
+      const result = await syncCalendar(restored, session, env);
+      normalized = { ...restored, tasks: result.tasks };
+      calendar = result.pending > 0 ? { ok: false, reason: "partial", pending: result.pending } : { ok: true };
+    } catch (error) {
+      console.error("Calendar sync failed", error);
+      calendar = { ok: false, reason: "sync_failed" };
+    }
+  }
+
   const updatedAt = new Date().toISOString();
   const writes = [];
   if (current?.state_json) {
@@ -282,17 +296,17 @@ async function restoreBackup(session, id, request, env) {
     `).bind(session.email, currentVersion, current.state_json, updatedAt));
   }
   writes.push(env.DB.prepare("UPDATE users SET state_json = ?, updated_at = ? WHERE email = ?")
-    .bind(backup.state_json, updatedAt, session.email));
+    .bind(JSON.stringify(normalized), updatedAt, session.email));
   await env.DB.batch(writes);
   if (current?.state_json) await pruneBackups(session.email, updatedAt, env);
 
   return json({
     ok: true,
-    state: restored,
+    state: normalized,
     version: currentVersion + 1,
     updatedAt,
     restoredFrom: Number(backup.id),
-    calendar: { ok: false, reason: "restore_deferred" },
+    calendar,
   }, 200, request, env);
 }
 
@@ -333,48 +347,136 @@ function validState(value) {
     && value.tasks.length <= 5000 && value.artists.length <= 100 && value.feed.length <= 1000;
 }
 
-async function syncCalendar(previous, incoming, session, env) {
-  const refreshToken = await decryptText(session.encryptedRefreshToken, env.TOKEN_ENCRYPTION_KEY);
-  const accessToken = await getGoogleAccessToken(refreshToken, env);
-  const oldTasks = new Map((previous?.tasks || []).map((task) => [String(task.id), task]));
-  const newTasks = incoming.tasks.map((task) => ({ ...task }));
-  const calendarId = encodeURIComponent(env.CALENDAR_ID || "primary");
+// La verdad de qué evento corresponde a cada tarea vive en calendar_sync, no en el
+// estado del usuario: así un PUT que se queda sin presupuesto de subpeticiones puede
+// reanudarse en el siguiente sin recrear eventos ni perder los que ya se sincronizaron.
+async function loadCalendarSync(env, email) {
+  const result = await env.DB.prepare(`
+    SELECT task_id, event_id, signature, meeting_status FROM calendar_sync WHERE user_email = ?
+  `).bind(email).all();
+  return new Map((result.results || []).map((row) => [String(row.task_id), {
+    eventId: row.event_id,
+    signature: row.signature || "",
+    meetingStatus: row.meeting_status || "",
+  }]));
+}
 
-  for (const task of newTasks) {
-    const old = oldTasks.get(String(task.id));
-    oldTasks.delete(String(task.id));
-    // Las tareas hechas conservan su evento: son registro de lo que ocurrió.
-    const shouldExist = Boolean(task.due);
-    const eventId = task.calendarEventId || old?.calendarEventId;
-    if (!shouldExist) {
-      if (eventId) await calendarDelete(calendarId, eventId, accessToken);
-      delete task.calendarEventId;
+// Prioriza borrados (baratos y evitan eventos zombis), luego lo más próximo en el
+// tiempo, y deja al final resolver el link de Meet: es lo único que no bloquea al
+// usuario si el presupuesto de la petición se agota.
+function planCalendarActions(tasks, syncRows) {
+  const seen = new Set();
+  const actions = [];
+  for (const task of tasks) {
+    const id = String(task.id);
+    seen.add(id);
+    const row = syncRows.get(id);
+    if (!task.due) {
+      if (row?.eventId) actions.push({ op: "delete", taskId: id, eventId: row.eventId, due: "" });
       continue;
     }
-    const changed = !old || calendarSignature(old) !== calendarSignature(task);
-    if (eventId && changed) {
-      const event = await calendarUpdate(calendarId, eventId, task, incoming, accessToken, task.meetingRequested && task.start && !taskMeetingLink(task));
-      applyCalendarEvent(task, event);
-    } else if (!eventId) {
-      const event = await calendarCreate(calendarId, task, incoming, accessToken);
-      applyCalendarEvent(task, event);
-    } else {
-      task.calendarEventId = eventId;
-      if (task.meetingRequested && task.start && !taskMeetingLink(task)) {
-        let event = await calendarGet(calendarId, eventId, accessToken);
-        if (!event.conferenceData) {
-          event = await calendarUpdate(calendarId, eventId, task, incoming, accessToken, true);
-        } else {
-          event = await resolveCalendarMeeting(calendarId, event, accessToken);
-        }
-        applyCalendarEvent(task, event);
-      }
+    const signature = calendarSignature(task);
+    if (!row?.eventId) {
+      actions.push({ op: "create", taskId: id, task, due: task.due });
+    } else if (row.signature !== signature) {
+      actions.push({ op: "update", taskId: id, task, eventId: row.eventId, due: task.due });
+    } else if (
+      task.meetingRequested && task.start && !taskMeetingLink(task) &&
+      row.meetingStatus !== "ready" && row.meetingStatus !== "failed"
+    ) {
+      actions.push({ op: "resolve-meeting", taskId: id, task, eventId: row.eventId, due: task.due });
     }
   }
-  for (const old of oldTasks.values()) {
-    if (old.calendarEventId) await calendarDelete(calendarId, old.calendarEventId, accessToken);
+  for (const [id, row] of syncRows) {
+    if (!seen.has(id) && row.eventId) actions.push({ op: "delete", taskId: id, eventId: row.eventId, due: "" });
   }
-  return { ...incoming, tasks: newTasks };
+  const rank = { delete: 0, create: 1, update: 1, "resolve-meeting": 2 };
+  actions.sort((a, b) => rank[a.op] - rank[b.op] || String(a.due).localeCompare(String(b.due)));
+  return actions;
+}
+
+async function syncCalendar(incoming, session, env) {
+  const refreshToken = await decryptText(session.encryptedRefreshToken, env.TOKEN_ENCRYPTION_KEY);
+  const accessToken = await getGoogleAccessToken(refreshToken, env);
+  const calendarId = encodeURIComponent(env.CALENDAR_ID || "primary");
+  const syncRows = await loadCalendarSync(env, session.email);
+  const actions = planCalendarActions(incoming.tasks, syncRows);
+  // El presupuesto de subpeticiones de un Worker es ~50; -1 ya se gastó en el refresh
+  // de arriba. Lo que no cabe queda "pending" y se reintenta en el próximo guardado.
+  const budget = { remaining: Math.max(1, Number(env.CALENDAR_BUDGET) || 40) - 1 };
+  const upserts = [];
+  const deletes = [];
+  let pending = 0;
+
+  for (const action of actions) {
+    if (budget.remaining <= 0) { pending += 1; continue; }
+    try {
+      if (action.op === "delete") {
+        budget.remaining -= 1;
+        await calendarDelete(calendarId, action.eventId, accessToken);
+        deletes.push(action.taskId);
+      } else if (action.op === "create") {
+        budget.remaining -= 1;
+        const requestConference = action.task.meetingRequested === true && Boolean(action.task.start);
+        let event = await calendarCreate(calendarId, action.task, incoming, accessToken);
+        if (requestConference) event = await resolveCalendarMeetingOnce(calendarId, event, accessToken, budget);
+        applyCalendarEvent(action.task, event);
+        upserts.push(syncRow(action, event));
+      } else if (action.op === "update") {
+        budget.remaining -= 1;
+        const requestConference = action.task.meetingRequested === true && Boolean(action.task.start) && !taskMeetingLink(action.task);
+        let event = await calendarUpdate(calendarId, action.eventId, action.task, incoming, accessToken, requestConference);
+        if (requestConference) event = await resolveCalendarMeetingOnce(calendarId, event, accessToken, budget);
+        applyCalendarEvent(action.task, event);
+        upserts.push(syncRow(action, event));
+      } else if (action.op === "resolve-meeting") {
+        budget.remaining -= 1;
+        let event = await calendarGet(calendarId, action.eventId, accessToken);
+        const failed = event?.conferenceData?.createRequest?.status?.statusCode === "failure";
+        if (!calendarMeetingLink(event) && !event?.conferenceData?.createRequest && !failed && budget.remaining > 0) {
+          budget.remaining -= 1;
+          event = await calendarUpdate(calendarId, action.eventId, action.task, incoming, accessToken, true);
+          event = await resolveCalendarMeetingOnce(calendarId, event, accessToken, budget);
+        }
+        applyCalendarEvent(action.task, event);
+        upserts.push(syncRow(action, event));
+      }
+    } catch (error) {
+      console.error(`Calendar ${action.op} failed for task ${action.taskId}`, error);
+      pending += 1;
+    }
+  }
+
+  const now = new Date().toISOString();
+  const writes = deletes
+    .map((id) => env.DB.prepare("DELETE FROM calendar_sync WHERE user_email = ? AND task_id = ?").bind(session.email, id))
+    .concat(upserts.map((item) => env.DB.prepare(`
+      INSERT INTO calendar_sync (user_email, task_id, event_id, signature, meeting_status, synced_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(user_email, task_id) DO UPDATE SET
+        event_id = excluded.event_id, signature = excluded.signature,
+        meeting_status = excluded.meeting_status, synced_at = excluded.synced_at
+    `).bind(session.email, item.taskId, item.eventId, item.signature, item.meetingStatus, now)));
+  if (writes.length) await env.DB.batch(writes);
+
+  const merged = new Map(syncRows);
+  for (const id of deletes) merged.delete(id);
+  for (const item of upserts) merged.set(item.taskId, { eventId: item.eventId, signature: item.signature, meetingStatus: item.meetingStatus });
+  const tasks = incoming.tasks.map((task) => {
+    const row = merged.get(String(task.id));
+    if (!task.due) { const { calendarEventId, ...rest } = task; return rest; }
+    return row?.eventId ? { ...task, calendarEventId: row.eventId } : task;
+  });
+  return { tasks, pending };
+}
+
+function syncRow(action, event) {
+  return {
+    taskId: action.taskId,
+    eventId: event.id || action.eventId,
+    signature: calendarSignature(action.task),
+    meetingStatus: action.task.meetingStatus || "",
+  };
 }
 
 function calendarSignature(task) {
@@ -446,12 +548,11 @@ async function calendarCreate(calendarId, task, state, accessToken) {
     body: JSON.stringify(calendarBody(task, state, requestConference)),
   });
   if (!response.ok) throw new Error(`Calendar create ${response.status}`);
-  const event = await response.json();
-  return requestConference ? resolveCalendarMeeting(calendarId, event, accessToken) : event;
+  return response.json();
 }
 
 async function calendarUpdate(calendarId, eventId, task, state, accessToken, requestConference = false) {
-  const suffix = task.meetingRequested ? "?conferenceDataVersion=1" : "";
+  const suffix = requestConference ? "?conferenceDataVersion=1" : "";
   const response = await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${encodeURIComponent(eventId)}${suffix}`, {
     method: "PATCH",
     headers: googleHeaders(accessToken),
@@ -461,8 +562,7 @@ async function calendarUpdate(calendarId, eventId, task, state, accessToken, req
     return calendarCreate(calendarId, task, state, accessToken);
   }
   if (!response.ok) throw new Error(`Calendar update ${response.status}`);
-  const event = await response.json();
-  return requestConference ? resolveCalendarMeeting(calendarId, event, accessToken) : event;
+  return response.json();
 }
 
 async function calendarGet(calendarId, eventId, accessToken) {
@@ -473,15 +573,15 @@ async function calendarGet(calendarId, eventId, accessToken) {
   return response.json();
 }
 
-async function resolveCalendarMeeting(calendarId, event, accessToken) {
-  let current = event;
-  const waits = [200, 400, 800, 1200, 1600];
-  for (const delay of waits) {
-    if (calendarMeetingLink(current) || current?.conferenceData?.createRequest?.status?.statusCode === "failure") break;
-    await new Promise((resolve) => setTimeout(resolve, delay));
-    current = await calendarGet(calendarId, current.id, accessToken);
-  }
-  return current;
+// Como máximo un reintento inmediato: si Google no resolvió el link de Meet en ese
+// instante, queda "pending" y se reintenta en el siguiente guardado (no bloquea el
+// presupuesto de subpeticiones esperando a que Google termine de crear la sala).
+async function resolveCalendarMeetingOnce(calendarId, event, accessToken, budget) {
+  if (calendarMeetingLink(event) || event?.conferenceData?.createRequest?.status?.statusCode === "failure") return event;
+  if (!event?.conferenceData?.createRequest || budget.remaining <= 0) return event;
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  budget.remaining -= 1;
+  return calendarGet(calendarId, event.id, accessToken);
 }
 
 function applyCalendarEvent(task, event) {

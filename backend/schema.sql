@@ -40,3 +40,16 @@ CREATE TABLE IF NOT EXISTS state_backups (
 
 CREATE INDEX IF NOT EXISTS state_backups_user_created_idx
   ON state_backups(user_email, created_at);
+
+CREATE TABLE IF NOT EXISTS calendar_sync (
+  user_email TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  signature TEXT NOT NULL DEFAULT '',
+  meeting_status TEXT NOT NULL DEFAULT '',
+  synced_at TEXT NOT NULL,
+  PRIMARY KEY (user_email, task_id),
+  FOREIGN KEY (user_email) REFERENCES users(email) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS calendar_sync_user_idx ON calendar_sync(user_email);

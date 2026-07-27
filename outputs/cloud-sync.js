@@ -9,6 +9,7 @@
   const configuredApi = String(window.ORION_LENTE_CONFIG?.apiBase || "").replace(/\/$/, "");
   let apiBase = configuredApi || localStorage.getItem(API_KEY) || "";
   let timer = null;
+  let calendarTimer = null;
   let saving = false;
   let reconciling = false;
   let syncRequested = false;
@@ -160,6 +161,19 @@
     return calendarOk === false || calendarPending() ? `Nube ${time} \u00b7 Calendar pendiente` : `Sincronizado \u00b7 ${time}`;
   }
 
+  // Cuando el respaldo de subpeticiones del Worker no basta para terminar de
+  // sincronizar Calendar en un solo guardado, el backend deja el resto "pending" y
+  // lo retoma en el siguiente PUT. Sin esto, ese resto solo avanzaria si el usuario
+  // volvia a tocar algo; con esto, la app sigue sola hasta terminar.
+  function scheduleCalendarContinuation(calendar, state) {
+    clearTimeout(calendarTimer);
+    if (!calendar || !(calendar.pending > 0)) return;
+    calendarTimer = setTimeout(() => {
+      pendingState = pendingState || clone(state);
+      flush();
+    }, 1500);
+  }
+
   async function flush() {
     if (!token() || !pendingState || saving) return;
     if (serverVersion === null) {
@@ -189,7 +203,12 @@
         window.OrionLente?.replaceState(rebased);
         pendingState = rebased;
       }
-      setStatus(syncedLabel(data.updatedAt, data.calendar?.ok), data.calendar?.ok === false ? "warning" : "ok", "Tus tareas estan guardadas en la nube");
+      scheduleCalendarContinuation(data.calendar, data.state);
+      if (data.calendar?.pending > 0) {
+        setStatus(`Sincronizando calendario\u2026 faltan ${data.calendar.pending}`, "working", "Terminando de crear o actualizar eventos en Google Calendar");
+      } else {
+        setStatus(syncedLabel(data.updatedAt, data.calendar?.ok), data.calendar?.ok === false ? "warning" : "ok", "Tus tareas estan guardadas en la nube");
+      }
     } catch (error) {
       if (error.message === "version_conflict" && error.data?.state) {
         const current = pendingState || window.OrionLente?.getState() || state;
@@ -279,6 +298,7 @@
     try { await request("/api/logout", { method: "POST" }); } catch {}
     localStorage.removeItem(TOKEN_KEY);
     pendingState = null;
+    clearTimeout(calendarTimer);
     refreshControls();
   }
 
@@ -304,10 +324,16 @@
     setStatus("Restaurando respaldo\u2026", "working");
     const data = await request(`/api/backups/${encodeURIComponent(id)}/restore`, { method: "POST" });
     pendingState = null;
-    localStorage.setItem(CALENDAR_PENDING_KEY, "1");
     saveMeta(data.state, data.version, data.updatedAt);
     window.OrionLente?.replaceState(data.state);
-    setStatus("Respaldo restaurado \u00b7 Calendar pendiente", "warning", "Calendar se actualizará en el siguiente guardado normal");
+    if (data.calendar?.ok === true) localStorage.removeItem(CALENDAR_PENDING_KEY);
+    else localStorage.setItem(CALENDAR_PENDING_KEY, "1");
+    scheduleCalendarContinuation(data.calendar, data.state);
+    setStatus(
+      data.calendar?.pending > 0 ? `Respaldo restaurado \u00b7 sincronizando calendario\u2026 faltan ${data.calendar.pending}` : data.calendar?.ok === false ? "Respaldo restaurado \u00b7 Calendar pendiente" : "Respaldo restaurado",
+      data.calendar?.ok === false ? "warning" : "ok",
+      "Calendar se actualiza en segundo plano",
+    );
     return data;
   }
 
